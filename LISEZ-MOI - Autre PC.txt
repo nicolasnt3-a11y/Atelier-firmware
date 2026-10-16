@@ -1,0 +1,48 @@
+======================================================================
+  ATELIER FIRMWARE — DOSSIER COMPLET POUR TRANSFERT SUR UN AUTRE PC
+======================================================================
+
+Ce dossier contient la totalité de l'application et de ses outils :
+  - atelier-firmware\   (l'application et son interface web)
+  - moria\              (outil d'extraction de firmware)
+  - mithril\            (outil d'inspection et recherche de failles/secrets)
+  - cpu_rec\            (détection d'architecture processeur)
+  - binbloom\           (analyse d'adresse de chargement / UDS)
+  - binwalk\            (analyse d'entropie et signatures)
+  - Rapports-Analyses-Sauvegarde\ (vos analyses existantes sauvegardées)
+
+IMPORTANT : Gardez tous ces sous-dossiers ensemble dans le même dossier parent,
+car Atelier Firmware cherche automatiquement moria, mithril, cpu_rec, binbloom
+et binwalk à côté du dossier "atelier-firmware".
+
+Si vous avez récupéré ce dossier depuis GitHub, les outils et les rapports n'y
+sont pas inclus. Clonez les outils à côté de "atelier-firmware" (depuis ce dossier) :
+
+   git clone https://github.com/nicolasnt3-a11y/moria
+   git clone https://github.com/nicolasnt3-a11y/mithril
+   git clone https://github.com/airbus-seclab/cpu_rec
+   git clone https://github.com/quarkslab/binbloom
+   git clone https://github.com/ReFirmLabs/binwalk
+
+----------------------------------------------------------------------
+  COMMENT L'UTILISER SUR L'AUTRE PC ?
+----------------------------------------------------------------------
+
+1. Prérequis sur le nouveau PC :
+   - Python 3 installé sous Windows (avec l'option "Add Python to PATH" cochée)
+   - Git pour Windows (https://git-scm.com/)
+   - WSL avec Ubuntu installé (commande : wsl --install -d Ubuntu)
+
+2. Installation en un clic :
+   - Placez ce dossier où vous voulez sur le nouveau PC (ex: C:\Users\...\projets\
+     ou directement sur le Bureau).
+   - Double-cliquez sur "Installer sur le nouveau PC.bat" :
+     -> Cela créera le raccourci "Atelier Firmware" sur le Bureau du nouveau PC
+     -> Cela copiera vos anciens rapports d'analyse dans Documents\Atelier Firmware
+
+3. Premier lancement sur le nouveau PC :
+   - Lancez "Atelier Firmware" depuis le Bureau (ou via "Lancer Atelier Firmware.bat").
+   - Dans la page web qui s'ouvre, allez dans l'onglet « Outils » et cliquez sur :
+     * « Installer » (compile moria, mithril, cpu_rec, binbloom, binwalk dans Ubuntu
+       et télécharge la base de failles CVE)
+     * « Installer Ghidra » (facultatif, si vous utilisez la rétro-ingénierie)

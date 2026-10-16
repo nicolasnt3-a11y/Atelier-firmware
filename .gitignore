@@ -1,0 +1,9 @@
+# Analyses personnelles : ne jamais publier.
+Rapports-Analyses-Sauvegarde/
+
+# Outils tiers : chacun a son propre dépôt (voir LISEZ-MOI - Autre PC.txt).
+moria/
+mithril/
+cpu_rec/
+binbloom/
+binwalk/
