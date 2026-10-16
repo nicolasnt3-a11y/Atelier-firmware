@@ -37,8 +37,13 @@ WSL_DB = "/root/.local/share/mithril"
 HOST, PORT = "127.0.0.1", 8765
 REQUIRED_TOOLS = ("moria", "mithril")           # indispensables à une analyse
 DEEP_TOOLS = ("cpu_rec", "binbloom", "binwalk")  # analyse approfondie (facultatifs)
-TOOLS = REQUIRED_TOOLS + DEEP_TOOLS
-UPSTREAM_BRANCH = "upstream/master"
+EXTRA_TOOLS = ("bulk_extractor", "yara")         # traces et crypto (facultatifs, ajoutés ensuite)
+TOOLS = REQUIRED_TOOLS + DEEP_TOOLS + EXTRA_TOOLS  # commandes installées dans Ubuntu
+# Dépôts à côté de l'Atelier. yara vient des paquets Ubuntu ; ses règles
+# (findcrypt-yara) sont un dépôt, copié tel quel.
+REPOS = REQUIRED_TOOLS + DEEP_TOOLS + ("bulk_extractor", "findcrypt-yara")
+UPSTREAM_BRANCH = "upstream/master"             # si le dépôt ne connaît pas upstream/HEAD
+YARA_RULES = "/opt/fwtools/src/findcrypt-yara/findcrypt3.rules"
 DEEP_SCRIPT = APP_DIR / "wsl" / "deep.py"
 
 # Ghidra (rétro-ingénierie, niveau 2) : téléchargé, pas compilé.
@@ -90,6 +95,7 @@ REPORT_FILES = {
     "sbom.spdx.json": "application/json",
     "deep.json": "application/json",
     "messages.txt": "text/plain; charset=utf-8",
+    "traces.txt": "text/plain; charset=utf-8",
     "entropy.png": "image/png",
     "ghidra.json": "application/json",
 }
@@ -149,6 +155,12 @@ def git(repo: Path, *args, timeout=120) -> tuple[int, str]:
         return -1, str(e)
 
 
+def upstream_ref(repo: Path) -> str:
+    """Branche principale du dépôt officiel (master, main…)."""
+    rc, _ = git(repo, "rev-parse", "--verify", "-q", "refs/remotes/upstream/HEAD")
+    return "upstream/HEAD" if rc == 0 else UPSTREAM_BRANCH
+
+
 def repo_state(name: str) -> dict:
     repo = REPOS_DIR / name
     if not (repo / ".git").exists():
@@ -156,7 +168,7 @@ def repo_state(name: str) -> dict:
     _, head = git(repo, "log", "-1", "--format=%h|%cs|%s")
     h, date, subject = (head.split("|", 2) + ["", "", ""])[:3]
     _, dirty = git(repo, "status", "--porcelain")
-    rc, behind = git(repo, "rev-list", "--count", f"HEAD..{UPSTREAM_BRANCH}")
+    rc, behind = git(repo, "rev-list", "--count", f"HEAD..{upstream_ref(repo)}")
     # Seuls moria et mithril ont un fichier VERSION ; sinon on affiche le commit.
     vrc, version = git(repo, "show", "HEAD:VERSION")
     return {
@@ -259,11 +271,13 @@ for t in {' '.join(TOOLS)}; do
   printf '%s=' "$t"
   if ! command -v "$t" >/dev/null; then echo absent
   elif [ "$t" = cpu_rec ] || [ "$t" = binbloom ]; then echo installé
+  elif [ "$t" = bulk_extractor ]; then bulk_extractor -V 2>/dev/null | head -1
   else "$t" --version 2>/dev/null | head -1; fi
 done
 if [ -s {WSL_DB}/osv-index.mdb ]; then printf 'db='; date -r {WSL_DB}/osv-index.mdb +%Y-%m-%d; else echo db=absent; fi
 if [ -x {GHIDRA_DIR}/support/analyzeHeadless ]; then echo ghidra=installé; else echo ghidra=absent; fi
 if command -v java >/dev/null; then echo java=présent; else echo java=absent; fi
+if [ -s {YARA_RULES} ]; then echo rules=présentes; else echo rules=absentes; fi
 """
     rc, out = wsl_capture(script, timeout=90)
     st = {"wsl": rc == 0, "tools": {}, "db": None, "ghidra": False, "java": False,
@@ -279,9 +293,13 @@ if command -v java >/dev/null; then echo java=présent; else echo java=absent; f
             st["ghidra"] = v == "installé"
         elif k == "java":
             st["java"] = v == "présent"
+        elif k == "rules":
+            st["yara_rules"] = v == "présentes"
     st["ready"] = st["wsl"] and all(st["tools"].get(t) for t in REQUIRED_TOOLS)
     st["deep_ready"] = st["wsl"] and all(st["tools"].get(t) for t in DEEP_TOOLS)
-    st["repos"] = [repo_state(t) for t in TOOLS]
+    st["extras_ready"] = (st["wsl"] and all(st["tools"].get(t) for t in EXTRA_TOOLS)
+                          and st.get("yara_rules", False))
+    st["repos"] = [repo_state(t) for t in REPOS]
     return st
 
 
@@ -307,9 +325,10 @@ def write_json(path: Path, data):
 
 
 def run_deep(job: Job, aid: str, source: Path):
-    """Analyse approfondie : carte de la puce, messages, processeur, adresse de chargement, binwalk."""
+    """Analyse approfondie : carte de la puce, messages, processeur, adresse de chargement, binwalk,
+    traces (bulk_extractor), crypto (yara)."""
     out = ANALYSES_DIR / aid
-    job.step("Analyse approfondie : carte, messages, processeur (1 à 3 minutes)")
+    job.step("Analyse approfondie : carte, messages, processeur, traces, crypto (2 à 5 minutes)")
     rc = job.run(f"python3 {q(to_wsl(DEEP_SCRIPT))} {q(to_wsl(source))} {q(to_wsl(out))} "
                  f"{q(to_wsl(out / 'moria.json'))}\n")
     if rc != 0 or read_json(out / "deep.json") is None:
@@ -533,7 +552,7 @@ def do_update_db(job: Job):
 
 def do_update_tools(job: Job):
     changed = []
-    for name in TOOLS:
+    for name in REPOS:
         repo = REPOS_DIR / name
         if not (repo / ".git").exists():
             continue
@@ -547,11 +566,12 @@ def do_update_tools(job: Job):
         if dirty.strip():
             raise UserError(f"Des fichiers ont été modifiés à la main dans {name}. "
                             "Par sécurité, rien n'a été touché. Demande de l'aide avant de continuer.")
-        _, behind = git(repo, "rev-list", "--count", f"HEAD..{UPSTREAM_BRANCH}")
+        ref = upstream_ref(repo)
+        _, behind = git(repo, "rev-list", "--count", f"HEAD..{ref}")
         if behind.strip() == "0":
             job.say(f"{name} est déjà à jour.")
             continue
-        rc, out = git(repo, "merge", "--ff-only", UPSTREAM_BRANCH)
+        rc, out = git(repo, "merge", "--ff-only", ref)
         job.say(out)
         if rc != 0:
             raise UserError(f"{name} contient des changements qui ne viennent pas du dépôt officiel : "
@@ -568,9 +588,9 @@ def do_update_tools(job: Job):
 
 
 def check_updates() -> list[dict]:
-    for name in TOOLS:
+    for name in REPOS:
         git(REPOS_DIR / name, "fetch", "upstream")
-    return [repo_state(t) for t in TOOLS]
+    return [repo_state(t) for t in REPOS]
 
 
 # --------------------------------------------------------------------------

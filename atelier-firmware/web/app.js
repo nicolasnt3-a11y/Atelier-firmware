@@ -881,7 +881,7 @@ function panelLicenses(licenses) {
 }
 
 // ==========================================================================
-// Analyse approfondie (wsl/deep.py : carte, messages, cpu_rec, binbloom, binwalk)
+// Analyse approfondie (wsl/deep.py : carte, messages, cpu_rec, binbloom, binwalk, bulk_extractor, yara)
 
 const fileUrl = (id, name, download) =>
   `/api/analyses/${encodeURIComponent(id)}/file/${name}${download ? "?dl=1" : ""}`;
@@ -939,6 +939,11 @@ function deepSummary(deep) {
   out.push(`<li><strong>Messages :</strong> ${plural(cat.total_strings || 0, "texte lisible", "textes lisibles")},
     dont ${plural(c.error || 0, "message d'erreur", "messages d'erreur")}, ${plural(c.log || 0, "message de journal", "messages de journal")}
     et ${plural(cat.modules?.length || 0, "module identifié", "modules identifiés")}.</li>`);
+  const tr = Object.fromEntries((deep.traces?.kinds || []).map(k => [k.kind, k.unique]));
+  const found = Object.entries(TRACE_SUMMARY).filter(([k]) => tr[k]).map(([k, [one, many]]) => plural(tr[k], one, many));
+  if (found.length) out.push(`<li><strong>Traces :</strong> ${esc(found.join(", "))}.</li>`);
+  const fams = [...new Set(cryptoGroups(deep.crypto || {}).filter(g => g.family !== "noise").map(g => g.label))];
+  if (fams.length) out.push(`<li><strong>Crypto et contrôles :</strong> ${esc(fams.join(", "))}.</li>`);
   if (udsCredible(deep)) out.push(`<li><strong>Diagnostic :</strong> une table de commandes UDS possible a été repérée (calculateur automobile probable).</li>`);
   return `<ul class="stack-list">${out.join("")}</ul>`;
 }
@@ -1077,6 +1082,150 @@ function binwalkSection(meta, bw) {
       <img src="${fileUrl(meta.id, "entropy.png")}" alt="Courbe d'entropie du fichier, de son début à sa fin" style="background:#fff;border-radius:8px"></details>` : ""}`;
 }
 
+// ---- Traces (bulk_extractor) ----------------------------------------------
+
+// Ordre d'affichage : d'abord ce qui identifie un véhicule ou une personne.
+const TRACE_KIND = {
+  vin: ["Numéros de châssis (VIN)", "Identifiant du véhicule (17 caractères, chiffre de contrôle vérifié). Dans un calculateur, c'est souvent celui de la voiture où il était monté."],
+  gps: ["Coordonnées GPS", "Positions enregistrées : navigation, historique de trajets, dernière position connue…"],
+  telephone: ["Numéros de téléphone", "Contacts, appels, numéros d'assistance ou de la carte SIM d'un module télématique (TCU)."],
+  vcard: ["Fiches contact (vCard)", "Répertoire synchronisé depuis un téléphone (Bluetooth)."],
+  email: ["Adresses e-mail", "Comptes d'utilisateurs, ou adresses des développeurs laissées dans le code."],
+  ether: ["Adresses MAC", "Identifiants matériels réseau ou Bluetooth : appareils appairés, interfaces du calculateur."],
+  wifi: ["Réseaux Wi-Fi", "Noms de réseaux (point d'accès du véhicule, réseaux connus)."],
+  ip: ["Adresses IP", "Serveurs contactés, réseau interne du véhicule (Ethernet automobile)."],
+  url: ["Adresses web (URL)", "Serveurs de mise à jour, services connectés, documentation."],
+  domain: ["Noms de domaine", "Domaines cités dans le firmware."],
+  rfc822: ["En-têtes d'e-mail", "Morceaux de messages électroniques."],
+  sqlite: ["Bases de données SQLite", "Bases souvent utilisées par l'infodivertissement (contacts, historique, réglages)."],
+  exif: ["Photos (métadonnées EXIF)", "Photos ou captures, parfois avec date et position GPS."],
+  jpeg: ["Images JPEG", "Images retrouvées dans le dump."],
+  aes_keys: ["Clés AES en mémoire", "Clés de chiffrement repérées par leur structure interne (programme de clé AES). À vérifier."],
+  elf: ["Programmes Linux (ELF)", "Programmes ou bibliothèques Linux présents dans le dump."],
+  json: ["Données JSON", "Configurations ou données échangées avec des serveurs."],
+  zip: ["Archives ZIP", "Archives dont le contenu a aussi été analysé."],
+  tcp: ["Paquets réseau", "Morceaux de communications réseau restés en mémoire."],
+  ccn: ["Numéros ressemblant à une carte bancaire", "Souvent de faux positifs dans un firmware (suites de chiffres qui passent le contrôle de Luhn)."],
+};
+
+// Pour le résumé : ce qui compte le plus en forensique.
+const TRACE_SUMMARY = {
+  vin: ["numéro de châssis (VIN)", "numéros de châssis (VIN)"], gps: ["position GPS", "positions GPS"],
+  telephone: ["numéro de téléphone", "numéros de téléphone"], email: ["adresse e-mail", "adresses e-mail"],
+  ether: ["adresse MAC", "adresses MAC"],
+};
+
+function tracesSection(meta, t) {
+  if (!t?.available) return `<p class="muted">bulk_extractor n'est pas installé (voir « Outils »).</p>`;
+  if (t.error && !t.kinds?.length) return notice("warn", "⚠", "bulk_extractor n'a pas pu terminer.", esc(t.error));
+  const order = Object.keys(TRACE_KIND), rank = k => (order.indexOf(k) + 1) || 99;
+  const kinds = [...(t.kinds || [])].sort((a, b) => rank(a.kind) - rank(b.kind));
+  const intro = `<p>bulk_extractor (outil de police scientifique informatique) parcourt <strong>tout le dump octet par octet</strong>,
+      sans avoir besoin d'en comprendre la structure, et relève ce qui ressemble à des numéros de châssis, positions GPS, numéros de téléphone,
+      adresses e-mail, adresses MAC… Il regarde aussi à l'intérieur des parties compressées.</p>`;
+  if (!kinds.length) return intro + `<p>Aucune trace trouvée.</p>`;
+  const tiles = kinds.map(k => `<button class="tile" data-trace="${esc(k.kind)}"><span class="n">${k.unique.toLocaleString("fr-FR")}</span>
+      <span class="l">${esc(TRACE_KIND[k.kind]?.[0] || k.kind)}</span></button>`).join("");
+  const where = it => it.o.map(hex).join(", ") + (it.inside ? ` <span class="badge info">dans ${esc(it.inside)}</span>` : "");
+  const lists = kinds.map(k => {
+    const [label, desc] = TRACE_KIND[k.kind] || [k.kind, ""];
+    const rows = k.items.slice(0, 100).map(it => `<tr><td class="mono">${esc(it.v)}</td><td class="num">${it.n}</td>
+        <td class="mono small">${where(it)}</td><td class="mono small muted">${esc(it.ctx)}</td></tr>`).join("");
+    return `<details class="more" id="trace-${esc(k.kind)}"${["vin", "gps"].includes(k.kind) ? " open" : ""}>
+      <summary><strong>${esc(label)}</strong> <span class="muted">· ${plural(k.unique, "valeur", "valeurs différentes")}, ${plural(k.total, "occurrence", "occurrences")}</span></summary>
+      ${desc ? `<p class="small muted" style="margin-top:.6rem">${esc(desc)}</p>` : ""}
+      <div class="table-wrap"><table><thead><tr><th scope="col">Valeur</th><th scope="col" class="num">Fois</th>
+        <th scope="col">Position</th><th scope="col">Contexte</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${k.unique > 100 ? `<p class="small muted">Seules les 100 valeurs les plus fréquentes sont affichées : la liste complète est dans le fichier téléchargeable.</p>` : ""}
+    </details>`;
+  }).join("");
+  return intro + notice("warn", "🔒", "Ces traces peuvent être des données personnelles.",
+      "Numéros de châssis, positions, contacts : ils permettent souvent d'identifier le propriétaire du véhicule. Conserve ce rapport en conséquence.") +
+    `<div class="tiles">${tiles}</div>${lists}
+    <p class="small" style="margin-top:.6rem"><a href="${fileUrl(meta.id, "traces.txt", true)}" download>Télécharger toutes les traces</a>
+      <span class="muted">· bulk_extractor ${esc(t.version || "")}, ${t.seconds ?? "?"} s${t.timeout ? " · interrompu (trop long), résultats partiels" : ""}</span></p>`;
+}
+
+// ---- Crypto et contrôles d'intégrité (yara) -------------------------------
+
+const CRYPTO_FAMILY = {
+  she: ["Module de sécurité (SHE)", "crit"], cipher: ["Chiffrement", "high"], asym: ["Clés et signatures", "high"],
+  hash: ["Empreinte (hachage)", "med"], integrity: ["Contrôle d'intégrité (CRC)", "info"], encoding: ["Encodage", "none"],
+  noise: ["Indice faible", "none"],
+};
+// [motif du nom de règle, libellé, famille, explication]. findcrypt et
+// automotive.yar trouvent parfois la même table : même libellé = une seule ligne.
+const CRYPTO_RULES = [
+  [/^AUTO_SHE/, "Constantes SHE", "she", "Le calculateur sait mettre à jour les clés de son module de sécurité matériel (norme SHE, très répandue dans l'automobile). Le code autour de cette adresse gère les clés du démarrage sécurisé et de l'authentification des messages."],
+  [/^AUTO_CRC8_SAE_J1850/, "CRC-8 SAE J1850", "integrity", "Utilisé par la protection E2E AUTOSAR (profils 1, 2 et 11) des messages CAN et par l'OBD."],
+  [/^AUTO_CRC8_H2F/, "CRC-8H2F", "integrity", "Utilisé par la protection E2E AUTOSAR (profil 2)."],
+  [/^(AUTO_CRC16_CCITT|CRC16_table$)/, "CRC-16 CCITT", "integrity", "Utilisé par la protection E2E AUTOSAR (profils 5, 6 et 11), le téléchargement UDS et XCP."],
+  [/^AUTO_CRC16_ARC/, "CRC-16 IBM / ARC", "integrity", "Contrôle d'intégrité courant (mémoire, communications série)."],
+  [/^(AUTO_CRC32_IEEE|CRC32_table)/, "CRC-32", "integrity", "Le CRC standard (AUTOSAR Crc_CalculateCRC32, vérification de la mémoire et des mises à jour)."],
+  [/^AUTO_CRC32_P4/, "CRC-32P4", "integrity", "Utilisé par la protection E2E AUTOSAR (profil 4), fréquent sur Ethernet automobile et FlexRay."],
+  [/^AUTO_CRC32_C/, "CRC-32C (Castagnoli)", "integrity", "Utilisé par certains chargeurs de démarrage et systèmes de fichiers."],
+  [/^AUTO_CRC64_ECMA/, "CRC-64 ECMA", "integrity", "Utilisé par la protection E2E AUTOSAR (profil 7)."],
+  [/^CRC32[bc]?_poly_Constant/, "Polynôme CRC-32", "integrity", "La constante d'un calcul de CRC-32 fait sans table."],
+  [/^RijnDael_AES_RCON/, "AES (constantes de clé)", "cipher", "Préparation des clés AES, le chiffrement standard (aussi la base de l'authentification CMAC des messages SecOC)."],
+  [/^(RijnDael_AES|DCP_RIJNDAEL)/, "AES (tables)", "cipher", "Tables du chiffrement AES : mises à jour chiffrées, SecOC, communications."],
+  [/^DES_/, "DES / 3DES", "cipher", "Ancien chiffrement, encore présent dans d'anciens calculateurs et cartes à puce."],
+  [/^(BLOWFISH|DCP_BLOWFISH)/, "Blowfish", "cipher", ""],
+  [/^TEA/, "TEA / XTEA", "cipher", "Petit chiffrement très simple, parfois utilisé dans les algorithmes « seed & key » de déverrouillage du diagnostic."],
+  [/^RC6/, "RC6", "cipher", ""],
+  [/^(Chacha|salsa20|Sosemanuk)/i, "ChaCha / Salsa20", "cipher", "Chiffrement moderne par flot (souvent dans TLS)."],
+  [/^SHA1/, "SHA-1", "hash", "Empreinte ancienne, souvent pour vérifier l'intégrité ou dans une signature."],
+  [/^SHA256/, "SHA-256", "hash", "Empreinte moderne : signature des mises à jour, démarrage sécurisé."],
+  [/^SHA512/, "SHA-512 / SHA-384", "hash", ""],
+  [/^MD5_Constants/, "MD5", "hash", "Empreinte ancienne (contrôle d'intégrité, mots de passe)."],
+  [/^(RIPEMD160|WHIRLPOOL)/, "RIPEMD-160 / Whirlpool", "hash", ""],
+  [/^pkcs8/, "Clé privée (PKCS#8)", "asym", "Une clé privée semble présente : grave si elle est la même dans tous les calculateurs."],
+  [/^x509/, "Certificat X.509", "asym", "Certificats : connexion TLS aux serveurs, vérification des mises à jour."],
+  [/^Prime_Constants/, "Table de nombres premiers", "asym", "Souvent liée à la génération ou la vérification de clés RSA."],
+  [/^(OpenSSL|RsaRef2|RsaEuro|CryptoPP|Miracl|BigDig|FGint|LockBox)_/, "Bibliothèque RSA / grands nombres", "asym", "Code de calcul sur grands nombres (RSA, signatures)."],
+  [/^BASE64_table/, "Table Base64", "encoding", "Encodage de données binaires en texte (certificats, échanges avec des serveurs)."],
+  [/./, null, "noise", "Motif peu spécifique (nombres hexadécimaux, routines de bibliothèques Windows) : souvent sans intérêt dans un calculateur."],
+];
+
+function cryptoGroups(c) {
+  const groups = new Map();
+  for (const m of c.matches || []) {
+    const [, label, family, desc] = CRYPTO_RULES.find(([rx]) => rx.test(m.rule));
+    const key = label || m.rule;
+    const g = groups.get(key) || { label: key, family, desc, n: 0, o: [] };
+    g.n += m.n;
+    g.o.push(...m.o);
+    groups.set(key, g);
+  }
+  const order = Object.keys(CRYPTO_FAMILY);
+  return [...groups.values()].map(g => ({ ...g, o: [...new Set(g.o)].sort((a, b) => a - b) }))
+    .sort((a, b) => order.indexOf(a.family) - order.indexOf(b.family) || (a.o[0] ?? 0) - (b.o[0] ?? 0));
+}
+
+function cryptoSection(c) {
+  if (!c?.available) return `<p class="muted">yara n'est pas installé (voir « Outils »).</p>`;
+  if (c.error) return notice("warn", "⚠", "yara n'a pas pu terminer.", esc(c.error));
+  const groups = cryptoGroups(c);
+  const strong = groups.filter(g => g.family !== "noise"), weak = groups.filter(g => g.family === "noise");
+  const row = g => {
+    const [fam, cls] = CRYPTO_FAMILY[g.family];
+    return `<tr><td><span class="badge ${cls}">${esc(fam)}</span></td><td><strong>${esc(g.label)}</strong>
+        ${g.desc ? `<br><span class="small muted">${esc(g.desc)}</span>` : ""}</td>
+      <td class="mono small">${g.o.slice(0, 6).map(hex).join(", ")}${g.n > 6 ? ` … (${g.n})` : ""}</td></tr>`;
+  };
+  const head = `<thead><tr><th scope="col">Famille</th><th scope="col">Algorithme</th><th scope="col">Position</th></tr></thead>`;
+  return `
+    <p>Les algorithmes de chiffrement et de contrôle utilisent des <strong>tables de constantes</strong> reconnaissables, quel que soit le processeur.
+      Les trouver dit ce que le calculateur protège (démarrage sécurisé, messages CAN authentifiés, mises à jour chiffrées) et
+      <strong>où regarder dans Ghidra</strong> : le code qui utilise une table est en général tout près.</p>
+    ${c.errors?.length ? notice("warn", "⚠", "Une partie des règles n'a pas pu être appliquée.", c.errors.map(esc).join("<br>")) : ""}
+    ${strong.length ? `<div class="table-wrap"><table>${head}<tbody>${strong.map(row).join("")}</tbody></table></div>`
+      : `<p>Aucune table de chiffrement ou de contrôle reconnue. Le code peut être compressé ou chiffré, ou calculer ses tables au démarrage.</p>`}
+    ${weak.length ? `<details class="more"><summary>${plural(weak.length, "indice faible", "indices faibles")} (souvent sans intérêt)</summary>
+      <div class="table-wrap"><table>${head}<tbody>${weak.map(row).join("")}</tbody></table></div></details>` : ""}
+    <p class="small muted" style="margin-top:.6rem">Règles : ${(c.rules || []).map(r => r === "atelier" ? "automobile (Atelier)" : r).join(", ") || "aucune"}
+      · yara ${esc(c.version || "")}.</p>`;
+}
+
 function panelDeep(meta, deep, mor, ghidra) {
   const intro = explain(`<p>Cette analyse ne cherche pas des failles : elle aide à <strong>comprendre ce qu'est ce firmware</strong>, surtout quand
     Moria ne sait pas l'ouvrir (calculateurs automobiles, microcontrôleurs, systèmes sans Linux). Elle dessine la carte de la puce,
@@ -1085,7 +1234,7 @@ function panelDeep(meta, deep, mor, ghidra) {
     const ready = STATUS?.deep_ready !== false;
     return intro + `<div class="card empty"><div class="big-icon" aria-hidden="true">🔬</div>
       <p>L'analyse approfondie n'a pas encore été faite pour ce fichier.</p>
-      ${ready ? `<button class="primary" id="run-deep">🔬 Lancer l'analyse approfondie (1 à 3 minutes)</button>`
+      ${ready ? `<button class="primary" id="run-deep">🔬 Lancer l'analyse approfondie (2 à 5 minutes)</button>`
         : `<p>Les outils nécessaires ne sont pas installés. <a href="#/outils">Aller dans « Outils »</a>.</p>`}</div>`;
   }
   return intro + `
@@ -1095,6 +1244,8 @@ function panelDeep(meta, deep, mor, ghidra) {
     <div class="card"><h2>Adresse de chargement du code</h2>${baseSection(deep.base, udsCredible(deep))}</div>
     <div class="card"><h2>Messages du firmware</h2>${catalogSection(meta, deep.catalog || {})}</div>
     <div class="card"><h2>Indices sur l'origine</h2>${hintsSection(deep.catalog || {})}</div>
+    <div class="card"><h2>Traces : VIN, GPS, téléphones, e-mails…</h2>${tracesSection(meta, deep.traces)}</div>
+    <div class="card"><h2>Chiffrement et contrôles d'intégrité</h2>${cryptoSection(deep.crypto)}</div>
     <div class="card"><h2>Deuxième avis : binwalk</h2>${binwalkSection(meta, deep.binwalk)}</div>
     <div class="card" id="ghidra-card"><h2>Comprendre le code (Ghidra)</h2>${ghidraSection(meta, deep, ghidra)}</div>
     <p class="no-print"><button id="rerun-deep">🔄 Relancer l'analyse approfondie</button></p>`;
@@ -1267,6 +1418,11 @@ function setupDeep(meta, deep) {
   $("#run-deep")?.addEventListener("click", run);
   $("#rerun-deep")?.addEventListener("click", run);
   if (!deep) return;
+  $$("[data-trace]").forEach(b => b.onclick = () => {
+    const d = $(`#trace-${b.dataset.trace}`);
+    d.open = true;
+    d.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
 
   const msgs = deep.catalog?.messages || [];
   const q = $("#msg-q"), cat = $("#msg-cat"), body = $("#msg-table tbody"), count = $("#msg-count");
@@ -1297,7 +1453,8 @@ function panelFiles(meta, r, deep, ghidra) {
         ${dl("mithril-report.json", "Rapport complet de Mithril (JSON)", "Toutes les données brutes de l'inspection.")}
         ${dl("moria.json", "Rapport complet de Moria (JSON)", "Toutes les données brutes de l'identification et de l'extraction.")}
         ${deep ? dl("deep.json", "Analyse approfondie (JSON)", "Carte de la puce, processeur, adresse de chargement, messages classés.") +
-          dl("messages.txt", "Tous les textes lisibles (texte)", "Un texte par ligne, précédé de sa position dans le fichier.") : ""}
+          dl("messages.txt", "Tous les textes lisibles (texte)", "Un texte par ligne, précédé de sa position dans le fichier.") +
+          (deep.traces?.kinds?.length ? dl("traces.txt", "Toutes les traces de bulk_extractor (texte)", "Type, position et valeur de chaque trace (VIN, GPS, téléphone…).") : "") : ""}
         ${ghidra ? dl("ghidra.json", "Rétro-ingénierie Ghidra (JSON)", "Fonctions, liens message→code et pseudo-code produits par Ghidra.") : ""}
       </ul>
       <div class="row"><button id="open-report">📂 Ouvrir le dossier du rapport</button></div>
@@ -1342,6 +1499,8 @@ const TOOL_INFO = {
   cpu_rec: ["cpu_rec", "reconnaît le processeur (analyse approfondie)"],
   binbloom: ["binbloom", "trouve l'adresse de chargement (analyse approfondie)"],
   binwalk: ["binwalk", "deuxième avis et graphique d'entropie (analyse approfondie)"],
+  bulk_extractor: ["bulk_extractor", "relève VIN, GPS, téléphones, e-mails, adresses MAC (analyse approfondie)"],
+  yara: ["yara", "repère les tables de chiffrement et de CRC (analyse approfondie)"],
 };
 
 async function renderTools() {
@@ -1383,7 +1542,7 @@ async function renderTools() {
         <dt>Ghidra</dt><dd>${st.ghidra ? `<span class="badge ok">Installé</span>` : `<span class="badge med">Pas installé</span>`}
           <span class="small muted">rétro-ingénierie du code (facultatif)</span></dd>
       </dl>
-      ${st.wsl && (!st.ready || !st.deep_ready) ? `<div class="row" style="margin-top:1rem"><button class="primary big" id="setup">🔧 Installer les outils</button>
+      ${st.wsl && (!st.ready || !st.deep_ready || !st.extras_ready) ? `<div class="row" style="margin-top:1rem"><button class="primary big" id="setup">🔧 Installer les outils</button>
         <span class="muted small">Compile tous les outils puis télécharge la base de failles (10 à 15 minutes la première fois).</span></div>` : ""}
     </div>
 
@@ -1423,7 +1582,8 @@ async function renderTools() {
           (<a href="https://github.com/nicolasnt3-a11y/moria" target="_blank" rel="noopener">moria</a>,
           <a href="https://github.com/nicolasnt3-a11y/mithril" target="_blank" rel="noopener">mithril</a>)
           et clique sur le bouton <strong>« Sync fork »</strong> puis <strong>« Update branch »</strong>.
-          cpu_rec, binbloom et binwalk sont copiés directement depuis leur dépôt officiel (pas de fork) : il n'y a rien à faire pour eux.</p>
+          cpu_rec, binbloom, binwalk, bulk_extractor et findcrypt-yara (les règles de yara) sont copiés directement depuis leur dépôt officiel
+          (pas de fork) : il n'y a rien à faire pour eux. yara lui-même vient des paquets d'Ubuntu.</p>
       </details>
     </div>
 

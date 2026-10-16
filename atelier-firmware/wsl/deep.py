@@ -7,8 +7,10 @@
   deep.json      résultats structurés lus par l'interface
   messages.txt   tous les textes lisibles trouvés, avec leur position
   entropy.png    graphique d'entropie de binwalk (si disponible)
+  traces.txt     toutes les traces trouvées par bulk_extractor (si disponible)
 
-Outils externes utilisés s'ils sont installés : cpu_rec, binbloom, binwalk.
+Outils externes utilisés s'ils sont installés : cpu_rec, binbloom, binwalk,
+bulk_extractor, yara (avec les règles de findcrypt-yara et automotive.yar).
 Chaque étape est indépendante : si un outil manque ou échoue, les autres
 résultats sont quand même produits.
 """
@@ -30,6 +32,13 @@ CPU_WINDOW = 0x10000
 BINBLOOM_TIMEOUT = 180
 BINBLOOM_MAX = 16 << 20       # binbloom devient très lent au-delà
 MAX_MESSAGES = 4000
+BULK_TIMEOUT = 1200
+MAX_TRACES = 300              # valeurs différentes gardées par type de trace
+YARA_TIMEOUT = 600
+YARA_RULES = [                # (fichier, origine)
+    ("/opt/fwtools/src/findcrypt-yara/findcrypt3.rules", "findcrypt"),
+    (os.path.join(os.path.dirname(os.path.abspath(__file__)), "automotive.yar"), "atelier"),
+]
 
 
 def say(msg):
@@ -379,6 +388,123 @@ def binwalk_scan(path, out):
 
 
 # --------------------------------------------------------------------------
+# 6. Traces (bulk_extractor) : e-mails, URL, téléphones, VIN, GPS, MAC…
+
+# Scanners utiles sur un dump de calculateur ; ceux absents de la version
+# installée sont ignorés (la liste des scanners évolue d'une version à l'autre).
+BULK_SCANNERS = ["accts", "aes", "elf", "email", "exif", "gps", "gzip", "json", "net",
+                 "sqlite", "vcard_carved", "vin", "zip"]
+OFFSET_RE = re.compile(r"^(\d+)(.*)$")
+
+
+def bulk_scanners():
+    r = subprocess.run(["bulk_extractor", "-H"], capture_output=True, text=True, errors="replace", timeout=60)
+    return set(re.findall(r"^Scanner Name: (\S+)", r.stdout, re.M))
+
+
+def read_feature_file(path):
+    """Lignes « position<TAB>valeur<TAB>contexte » ; la position peut être
+    « 1234-GZIP-56 » quand la trace est dans une partie compressée."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith("#") or not line.strip():
+                continue
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 2:
+                continue
+            m = OFFSET_RE.match(parts[0])
+            if not m:
+                continue
+            yield int(m.group(1)), m.group(2).lstrip("-"), parts[1], parts[2] if len(parts) > 2 else ""
+
+
+def bulk_scan(path, out):
+    if not shutil.which("bulk_extractor"):
+        return {"available": False}
+    r = subprocess.run(["bulk_extractor", "-V"], capture_output=True, text=True, errors="replace", timeout=60)
+    version = (r.stdout.split() or [""])[-1]
+    names = bulk_scanners()
+    wanted = [s for s in BULK_SCANNERS if s in names]
+    cmd = ["bulk_extractor", "-q", "-j", str(os.cpu_count() or 4)]
+    if wanted:
+        cmd += ["-x", "all"] + [a for s in wanted for a in ("-e", s)]
+    res = {"available": True, "version": version, "scanners": wanted, "kinds": []}
+    with tempfile.TemporaryDirectory() as tmp:
+        outdir = os.path.join(tmp, "be")
+        t0 = time.time()
+        try:
+            r = subprocess.run(cmd + ["-o", outdir, path], capture_output=True, text=True, errors="replace",
+                               timeout=BULK_TIMEOUT, cwd=tmp)
+        except subprocess.TimeoutExpired:
+            res["timeout"] = True
+            r = None
+        res["seconds"] = round(time.time() - t0)
+        if r is not None and r.returncode != 0:
+            res["error"] = (r.stderr or r.stdout).strip()[-500:]
+        files = sorted(f for f in (os.listdir(outdir) if os.path.isdir(outdir) else [])
+                       if f.endswith(".txt") and not f.endswith("_histogram.txt") and f != "alerts.txt")
+        with open(os.path.join(out, "traces.txt"), "w", encoding="utf-8") as full:
+            for name in files:
+                kind = name[:-4]
+                groups = {}
+                total = 0
+                for off, inside, value, ctx in read_feature_file(os.path.join(outdir, name)):
+                    total += 1
+                    full.write(f"{kind}\t0x{off:08x}{'-' + inside if inside else ''}\t{value}\n")
+                    key = value.lower() if kind in ("email", "domain", "url") else value
+                    g = groups.get(key)
+                    if g is None:
+                        g = groups[key] = {"v": value[:300], "n": 0, "o": [], "ctx": ctx[:160], "inside": inside}
+                    g["n"] += 1
+                    if len(g["o"]) < 5:
+                        g["o"].append(off)
+                if total:
+                    items = sorted(groups.values(), key=lambda g: (-g["n"], g["o"][0]))
+                    res["kinds"].append({"kind": kind, "total": total, "unique": len(items),
+                                         "items": items[:MAX_TRACES], "truncated": len(items) > MAX_TRACES})
+    return res
+
+
+# --------------------------------------------------------------------------
+# 7. Crypto et contrôles d'intégrité (YARA)
+
+def yara_scan(path):
+    if not shutil.which("yara"):
+        return {"available": False}
+    r = subprocess.run(["yara", "--version"], capture_output=True, text=True, errors="replace", timeout=30)
+    res = {"available": True, "version": r.stdout.strip(), "rules": [], "matches": []}
+    for rules, origin in YARA_RULES:
+        if not os.path.exists(rules):
+            continue
+        res["rules"].append(origin)
+        try:
+            r = subprocess.run(["yara", "-s", "-w", "-a", str(YARA_TIMEOUT), rules, path], capture_output=True,
+                               text=True, errors="replace", timeout=YARA_TIMEOUT + 60)
+        except subprocess.TimeoutExpired:
+            res.setdefault("errors", []).append(f"{origin} : délai dépassé")
+            continue
+        if r.returncode != 0:
+            res.setdefault("errors", []).append(f"{origin} : {r.stderr.strip()[-300:]}")
+        current = None
+        for line in r.stdout.splitlines():
+            m = re.match(r"^0x([0-9a-f]+):(\$\w*): ?(.*)$", line)
+            if m and current is not None:
+                current["n"] += 1
+                if len(current["o"]) < 20:
+                    # Les règles CRC de l'Atelier commencent à la 2ᵉ case de la table (la 1re vaut 0) :
+                    # on donne le début de la table, comme findcrypt.
+                    crc = re.match(r"AUTO_CRC(\d+)_", current["rule"])
+                    current["o"].append(int(m.group(1), 16) - (int(crc.group(1)) // 8 if crc else 0))
+                    current["s"].append(m.group(2))
+                if not current["preview"]:
+                    current["preview"] = m.group(3)[:96]
+            elif line and not line.startswith("0x"):
+                current = {"rule": line.split()[0], "origin": origin, "n": 0, "o": [], "s": [], "preview": ""}
+                res["matches"].append(current)
+    return res
+
+
+# --------------------------------------------------------------------------
 
 def main():
     path, out = sys.argv[1], sys.argv[2]
@@ -420,6 +546,18 @@ def main():
         result["binwalk"] = binwalk_scan(path, out)
     except Exception as e:
         result["binwalk"] = {"available": True, "error": repr(e)}
+
+    say("-- Traces : e-mails, téléphones, VIN, GPS… (bulk_extractor)")
+    try:
+        result["traces"] = bulk_scan(path, out)
+    except Exception as e:
+        result["traces"] = {"available": True, "error": repr(e)}
+
+    say("-- Crypto et contrôles d'intégrité (yara)")
+    try:
+        result["crypto"] = yara_scan(path)
+    except Exception as e:
+        result["crypto"] = {"available": True, "error": repr(e)}
 
     if moria:
         known = {f.get("offset") for f in moria.get("findings", [])}

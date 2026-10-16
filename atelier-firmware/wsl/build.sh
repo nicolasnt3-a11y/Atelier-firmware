@@ -24,11 +24,11 @@ if [[ "${1:-}" == "--deps" ]]; then
     apt-get install -y -qq cmake g++ python3 curl unzip tar rsync \
         zlib1g-dev liblzma-dev liblz4-dev libzstd-dev \
         autoconf automake libtool pkg-config \
-        cargo rustc clang libfontconfig1-dev libssl-dev >/dev/null
+        cargo rustc clang libfontconfig1-dev libssl-dev         flex libabsl-dev libexpat1-dev libgcrypt20-dev libgpg-error-dev libre2-dev         yara >/dev/null
 fi
 
 tools=("$@")
-[[ ${#tools[@]} -eq 0 ]] && tools=(moria mithril cpu_rec binbloom binwalk)
+[[ ${#tools[@]} -eq 0 ]] && tools=(moria mithril cpu_rec binbloom binwalk bulk_extractor findcrypt-yara)
 jobs=$(( $(nproc) > 8 ? 8 : $(nproc) ))
 
 # Copie propre des sources (sans l'historique git).
@@ -74,6 +74,19 @@ EOF
             cargo build --release --locked --quiet --target-dir "$BUILD/binwalk" )
         install -m755 "$BUILD/binwalk/release/binwalk" /usr/local/bin/binwalk
         binwalk --version 2>/dev/null || true
+        ;;
+    bulk_extractor)
+        copy_src bulk_extractor
+        # Sans E01 (libewf) : inutile pour des dumps de puces.
+        # Compilation C++ : plusieurs minutes la première fois.
+        ( cd "$SRC/bulk_extractor" && ./bootstrap.sh && ./configure -q --disable-libewf             && make -s -j"$jobs" ) >"$BUILD/bulk_extractor.log" 2>&1             || { tail -30 "$BUILD/bulk_extractor.log"; exit 1; }
+        install -m755 "$SRC/bulk_extractor/src/bulk_extractor" /usr/local/bin/bulk_extractor
+        bulk_extractor -V
+        ;;
+    findcrypt-yara)
+        # Règles YARA (constantes crypto) : simple copie, lues par yara (paquet Ubuntu).
+        copy_src findcrypt-yara
+        yara --version >/dev/null && echo "règles findcrypt prêtes (yara $(yara --version))"
         ;;
     esac
 done

@@ -12,7 +12,12 @@ Une interface simple, en français, pour analyser des firmwares avec
   - carte de la puce et catalogue des messages (`wsl/deep.py`, écrits pour l'Atelier) ;
   - processeur avec [cpu_rec](https://github.com/airbus-seclab/cpu_rec) (Airbus) ;
   - adresse de chargement et table de diagnostic UDS avec [binbloom](https://github.com/quarkslab/binbloom) (Quarkslab) ;
-  - deuxième avis et graphique d'entropie avec [binwalk](https://github.com/ReFirmLabs/binwalk) v3.
+  - deuxième avis et graphique d'entropie avec [binwalk](https://github.com/ReFirmLabs/binwalk) v3 ;
+  - traces (numéros de châssis VIN, GPS, téléphones, e-mails, adresses MAC, bases SQLite…) avec
+    [bulk_extractor](https://github.com/simsong/bulk_extractor), l'outil de police scientifique informatique ;
+  - tables de chiffrement et de contrôle (AES, SHA, RSA, CRC, constantes SHE) avec [yara](https://github.com/VirusTotal/yara),
+    les règles de [findcrypt-yara](https://github.com/polymorf/findcrypt-yara) et `wsl/automotive.yar`
+    (écrites pour l'Atelier : CRC des profils E2E AUTOSAR en petit- et gros-boutiste, constantes SHE).
 - **La rétro-ingénierie** (facultative, à la demande) traduit le code machine en pseudo-code
   et relie chaque message à la fonction qui l'affiche, avec [Ghidra](https://github.com/NationalSecurityAgency/ghidra)
   (NSA) : `wsl/export_ghidra.java` est exécuté par Ghidra après son analyse. Se lance depuis
@@ -34,6 +39,8 @@ C:\Users\<toi>\projets\
 ├── cpu_rec\            copie du dépôt officiel (jamais modifiée)
 ├── binbloom\           copie du dépôt officiel (jamais modifiée)
 ├── binwalk\            copie du dépôt officiel (jamais modifiée)
+├── bulk_extractor\     copie du dépôt officiel (jamais modifiée)
+├── findcrypt-yara\     copie du dépôt officiel (règles yara, jamais modifiées)
 └── atelier-firmware\   cette interface
     ├── server.py       le programme qui pilote moria et mithril
     ├── atelier.pyw     le lanceur (utilisé par le raccourci)
@@ -41,6 +48,7 @@ C:\Users\<toi>\projets\
     └── wsl\
         ├── build.sh          la compilation des outils dans Ubuntu
         ├── deep.py           l'analyse approfondie (niveau 1)
+        ├── automotive.yar    règles yara automobiles (CRC E2E, SHE)
         └── export_ghidra.java  l'export de la rétro-ingénierie (niveau 2)
 
 Documents\Atelier Firmware\
@@ -50,8 +58,9 @@ Documents\Atelier Firmware\
 
 Les outils tournent dans **Ubuntu (WSL)** car ils ne fonctionnent que sous Linux.
 moria et mithril sont compilés « à côté » de leurs dépôts (`/opt/fwtools/build`) ;
-cpu_rec, binbloom et binwalk sont d'abord copiés dans `/opt/fwtools/src`, car leur
-compilation écrit dans le dossier source. Tous sont installés dans `/usr/local/bin`.
+cpu_rec, binbloom, binwalk, bulk_extractor et findcrypt-yara sont d'abord copiés dans
+`/opt/fwtools/src`, car leur compilation écrit dans le dossier source. yara vient des
+paquets d'Ubuntu (`apt`). Tous sont installés dans `/usr/local/bin`.
 Ghidra n'est pas compilé (ce serait trop long) : la version officielle de la NSA est
 téléchargée dans `/opt/fwtools/ghidra/` (comme la base de failles), avec Java 21.
 Les fichiers extraits sont rangés dans `/root/atelier/` côté Ubuntu.
@@ -65,8 +74,9 @@ Chaque dépôt (`moria`, `mithril`) connaît deux adresses :
 | `origin`   | github.com/nicolasnt3-a11y/…              | ton fork                      |
 | `upstream` | github.com/nmatt0/…                       | le dépôt officiel de l'auteur |
 
-cpu_rec, binbloom et binwalk n'ont pas de fork : `origin` et `upstream` pointent
-tous deux vers le dépôt officiel.
+cpu_rec, binbloom, binwalk, bulk_extractor et findcrypt-yara n'ont pas de fork : `origin` et
+`upstream` pointent tous deux vers le dépôt officiel. La mise à jour suit la branche principale
+de chaque dépôt officiel (`upstream/HEAD` : `master` ou `main`).
 
 L'Atelier ne modifie aucun fichier des dépôts : il les compile *à côté* et lit
 seulement leurs résultats JSON. Le bouton **Outils › Mettre à jour et recompiler**

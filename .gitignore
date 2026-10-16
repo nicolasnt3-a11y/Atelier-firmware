@@ -7,3 +7,5 @@ mithril/
 cpu_rec/
 binbloom/
 binwalk/
+bulk_extractor/
+findcrypt-yara/

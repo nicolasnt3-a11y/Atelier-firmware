@@ -9,11 +9,13 @@ Ce dossier contient la totalité de l'application et de ses outils :
   - cpu_rec\            (détection d'architecture processeur)
   - binbloom\           (analyse d'adresse de chargement / UDS)
   - binwalk\            (analyse d'entropie et signatures)
+  - bulk_extractor\     (traces : VIN, GPS, téléphones, e-mails, adresses MAC)
+  - findcrypt-yara\     (règles yara : tables de chiffrement)
   - Rapports-Analyses-Sauvegarde\ (vos analyses existantes sauvegardées)
 
 IMPORTANT : Gardez tous ces sous-dossiers ensemble dans le même dossier parent,
-car Atelier Firmware cherche automatiquement moria, mithril, cpu_rec, binbloom
-et binwalk à côté du dossier "atelier-firmware".
+car Atelier Firmware cherche automatiquement moria, mithril, cpu_rec, binbloom,
+binwalk, bulk_extractor et findcrypt-yara à côté du dossier "atelier-firmware".
 
 Si vous avez récupéré ce dossier depuis GitHub, les outils et les rapports n'y
 sont pas inclus. Clonez les outils à côté de "atelier-firmware" (depuis ce dossier) :
@@ -23,6 +25,12 @@ sont pas inclus. Clonez les outils à côté de "atelier-firmware" (depuis ce do
    git clone https://github.com/airbus-seclab/cpu_rec
    git clone https://github.com/quarkslab/binbloom
    git clone https://github.com/ReFirmLabs/binwalk
+   git clone https://github.com/simsong/bulk_extractor
+   git clone https://github.com/polymorf/findcrypt-yara
+
+Puis, dans chacun de ces dossiers, déclarez le dépôt officiel (utilisé pour les
+mises à jour) : git remote add upstream <même adresse> ; git fetch upstream ;
+git remote set-head upstream -a
 
 ----------------------------------------------------------------------
   COMMENT L'UTILISER SUR L'AUTRE PC ?
@@ -43,6 +51,7 @@ sont pas inclus. Clonez les outils à côté de "atelier-firmware" (depuis ce do
 3. Premier lancement sur le nouveau PC :
    - Lancez "Atelier Firmware" depuis le Bureau (ou via "Lancer Atelier Firmware.bat").
    - Dans la page web qui s'ouvre, allez dans l'onglet « Outils » et cliquez sur :
-     * « Installer » (compile moria, mithril, cpu_rec, binbloom, binwalk dans Ubuntu
+     * « Installer » (compile moria, mithril, cpu_rec, binbloom, binwalk,
+       bulk_extractor et installe yara dans Ubuntu
        et télécharge la base de failles CVE)
      * « Installer Ghidra » (facultatif, si vous utilisez la rétro-ingénierie)
